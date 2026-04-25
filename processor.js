@@ -3,6 +3,7 @@ const pino = require('pino');
 const qrcode = require('qrcode-terminal');
 const { GoogleGenAI } = require('@google/genai');
 const crypto = require('crypto');
+const cron = require('node-cron'); 
 const { 
     config, 
     supabaseService, 
@@ -11,7 +12,7 @@ const {
     generateReport, 
     prompts 
 } = require('wa-field-tracker-core');
-const { gmailService } = require('../feeder-email');
+const { gmailService } = require('wa-field-tracker-feeder-email');
 const { parseMessage } = messageParser;
 const { generateAndSendReport } = generateReport;
 const { screeningPrompt, leaveExtractionPrompt, paymentExtractionPrompt, visitExtractionPrompt } = prompts;
