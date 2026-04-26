@@ -72,11 +72,11 @@ class SupabaseService {
             const payload = dto.getPayload();
             const { error } = await this.client
                 .from('messages')
-                .insert([payload]);
+                .upsert([payload], { onConflict: 'messageTraceId' });
             if (error) {
-                console.error('❌ Error inserting into Supabase messages table:', error.message);
+                console.error('❌ Error inserting/upserting into Supabase messages table:', error.message);
             } else {
-                console.log(`✅ Message payload successfully sent to Supabase messages table.`);
+                console.log(`✅ Message payload successfully synced to Supabase (Idempotent).`);
             }
         } catch (err) {
             console.error('❌ sendtoDatabase failed:', err.message);
@@ -461,6 +461,22 @@ class SupabaseService {
             if (error) throw error;
             return data.id;
         } catch (err) {
+            return null;
+        }
+    }
+
+    async getEmployeeById(id) {
+        if (!this.client || !id) return null;
+        try {
+            const { data, error } = await this.client
+                .from('employees')
+                .select('*')
+                .eq('id', id)
+                .maybeSingle();
+            if (error) throw error;
+            return data;
+        } catch (err) {
+            console.error(`❌ getEmployeeById failed for ${id}:`, err.message);
             return null;
         }
     }
