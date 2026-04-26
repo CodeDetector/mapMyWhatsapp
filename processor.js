@@ -3,22 +3,25 @@ const pino = require('pino');
 const qrcode = require('qrcode-terminal');
 const { GoogleGenAI } = require('@google/genai');
 const crypto = require('crypto');
-const cron = require('node-cron'); 
-const { 
-    config, 
-    supabaseService, 
-    intelligenceService, 
-    messageParser, 
-    generateReport, 
-    prompts 
-} = require('wa-field-tracker-core');
-const { gmailService } = require('wa-field-tracker-feeder-email');
-const { parseMessage } = messageParser;
-const { generateAndSendReport } = generateReport;
+const cron = require('node-cron');
+const config = require('./config');
+const supabaseService = require('./supabaseService');
+const intelligenceService = require('./intelligenceService');
+const prompts = require('./prompts');
+const { generateAndSendReport } = require('./generateReport');
+const { handleConnectGmail, handleGmailCode } = require('./criticalCmds/gmailAuthCmds');
+
+const { parseMessage } = require('./messageParser');
 const { screeningPrompt, leaveExtractionPrompt, paymentExtractionPrompt, visitExtractionPrompt } = prompts;
 
+const CriticalCommands = {
+    CONNECT_GMAIL: '!connect gmail',
+    GMAIL_CODE: '!gmail code',
+    ENABLE: '!enable',
+    DISABLE: '!disable'
+};
+
 const groupNameCache = {};
-let slaMonitorStarted = false;
 let cronJobsStarted = false;
 
 async function connectToWhatsApp() {
@@ -33,20 +36,37 @@ async function connectToWhatsApp() {
         logger: pino({ level: 'silent' }),
         browser: Browsers.macOS('Desktop'),
         syncFullHistory: false,
-        connectTimeoutMs: 60000, // Increase timeout to 60s to handle 408
+        connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000
     });
 
+    const reportStatus = async (connected, qr = null) => {
+        try {
+            await fetch('http://localhost:3000/api/whatsapp/update-status', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ connected, qr })
+            });
+        } catch (err) {
+            console.error('⚠️ Could not report status to backend:', err.message);
+        }
+    };
+
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
-        if (qr) qrcode.generate(qr, { small: true });
+
+        if (qr) {
+            qrcode.generate(qr, { small: true });
+            reportStatus(false, qr);
+        }
 
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             console.log(`❌ WhatsApp Connection closed. Status: ${statusCode}`);
+            reportStatus(false);
 
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== 405;
-            
+
             if (shouldReconnect) {
                 console.log('🔄 Reconnecting WhatsApp in 5 seconds...');
                 setTimeout(connectToWhatsApp, 5000);
@@ -56,57 +76,11 @@ async function connectToWhatsApp() {
             }
         } else if (connection === 'open') {
             console.log('✅ WhatsApp Bot is ready and connected!');
+            reportStatus(true);
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
-
-    // 📊 SLA Monitor & WhatsApp Notification Logic
-    const lastSlaNotification = {};
-
-    async function startSLAMonitor() {
-        console.log('📊 Starting SLA Monitor (Rule: 5min reply required)...');
-        
-        setInterval(async () => {
-            try {
-                const pending = await supabaseService.getPendingReplies();
-                
-                for (const item of pending) {
-                    if (item.waitTime >= 5) {
-                        const employeePhone = item.employeeInfo.Mobile || item.employeeInfo.contact;
-                        if (!employeePhone) continue;
-
-                        const jid = employeePhone.includes('@s.whatsapp.net') 
-                            ? employeePhone 
-                            : `${employeePhone.replace(/\D/g, '')}@s.whatsapp.net`;
-
-                        const now = Date.now();
-                        const lastNotified = lastSlaNotification[item.threadId] || 0;
-                        
-                        if (now - lastNotified > 15 * 60 * 1000) {
-                            console.log(`🚨 SLA Breach! Notifying ${item.employeeInfo.Name} about thread ${item.threadId}...`);
-                            
-                            const alertMessage = `🚨 *SLA ALERT* 🚨\n\nHi ${item.employeeInfo.Name},\n\nYou have an unread email from *${item.client}* waiting for a reply for *${item.waitTime} minutes*.\n\nPlease respond as soon as possible to maintain our 5-min SLA.`;
-                            
-                            await sock.sendMessage(jid, { text: alertMessage });
-                            lastSlaNotification[item.threadId] = now;
-                        }
-                    }
-                }
-            } catch (err) {
-                console.error('❌ SLA Monitor error:', err.message);
-            }
-        }, 60000);
-    }
-
-    // Start SLA Sub-service
-    // Note: This monitors the database for pending replies and sends WhatsApp alerts.
-    // It works as long as the WhatsApp connection is open.
-    if (!slaMonitorStarted) {
-        console.log('📊 Initializing SLA Monitor...');
-        startSLAMonitor();
-        slaMonitorStarted = true;
-    }
 
     sock.ev.on('messages.upsert', async m => {
         const messages = m.messages;
@@ -117,79 +91,45 @@ async function connectToWhatsApp() {
             const text = rawText.trim();
             const remoteJid = msg.key.remoteJid;
 
-            // 🛑 CRITICAL INTERCEPTION: Don't let commands reach the DB Logger
-            if (text.startsWith('!')) {
-                console.log(`🤖 Command detected: ${text}`);
+            const commandKey = Object.keys(CriticalCommands).find(key => text.startsWith(CriticalCommands[key]));
 
-                if (text.startsWith('!connect gmail')) {
-                    const authUrl = gmailService.getAuthUrl();
-                    if (authUrl) {
-                        await sock.sendMessage(remoteJid, { text: `🔗 *OMNI-BRAIN AUTH* 🔗\n\n1. Open: ${authUrl}\n\n2. Authorize and copy the code.\n\n3. Reply here with: !gmail code YOUR_CODE` });
-                    }
+            if (commandKey) {
+                console.log(`🤖 Command detected: ${text} (${commandKey})`);
+
+                const fullCommand = CriticalCommands[commandKey];
+
+                if (fullCommand === CriticalCommands.CONNECT_GMAIL) {
+                    await handleConnectGmail(sock, remoteJid);
                 }
 
-                if (text.startsWith('!gmail code ')) {
-                    const code = text.replace('!gmail code ', '').trim();
-                    // Resolve sender: participant for groups, remoteJid for DMs
-                    const senderNum = (msg.key.participant || remoteJid).split('@')[0];
-                    
-                    console.log(`🔐 Attempting Vault Save for ${senderNum}...`);
-                    try {
-                        const employeeId = await supabaseService.getEmployeeId(senderNum);
-                        if (!employeeId) throw new Error(`Phone number ${senderNum} is not registered in the Employees table.`);
-
-                        const tokens = await gmailService.getTokens(code);
-                        const success = await supabaseService.saveEmployeeToken(employeeId, 'gmail', tokens);
-                        
-                        if (success) {
-                            // Auto-enable integration on successful connect
-                            await supabaseService.toggleIntegration(employeeId, 'gmail', true);
-                            // NEW: Fetch and update emailId in employees table
-                            try {
-                                const profile = await gmailService.getProfile(tokens);
-                                if (profile && profile.emailAddress) {
-                                    await supabaseService.updateEmployeeEmail(employeeId, profile.emailAddress);
-                                    await sock.sendMessage(remoteJid, { text: `✅ *VAULT SECURED* ✅\n\nYour inbox (*${profile.emailAddress}*) is now connected. OMNI-BRAIN is monitoring your Gmail.` });
-                                } else {
-                                    await sock.sendMessage(remoteJid, { text: '✅ *VAULT SECURED* ✅\n\nYour Gmail credentials have been moved to the encrypted vault.' });
-                                }
-                            } catch (profErr) {
-                                console.error('⚠️ Could not fetch Gmail profile:', profErr.message);
-                                await sock.sendMessage(remoteJid, { text: '✅ *VAULT SECURED* ✅\n\nCredentials saved, but could not verify email address.' });
-                            }
-                        } else {
-                            throw new Error('Database Vault RPC failed. Did you run the SQL script?');
-                        }
-                    } catch (err) {
-                        console.error('❌ Vault Error:', err.message);
-                        await sock.sendMessage(remoteJid, { text: `❌ *VAULT ERROR*\n\nReason: ${err.message}` });
-                    }
+                if (fullCommand === CriticalCommands.GMAIL_CODE) {
+                    await handleGmailCode(sock, remoteJid, msg, text);
                 }
 
-                if (text.startsWith('!enable ') || text.startsWith('!disable ')) {
-                    const isEnable = text.startsWith('!enable ');
+                if (fullCommand === CriticalCommands.ENABLE || fullCommand === CriticalCommands.DISABLE) {
+                    const isEnable = fullCommand === CriticalCommands.ENABLE;
                     const provider = text.split(' ')[1]?.toLowerCase();
                     const senderNum = (msg.key.participant || remoteJid).split('@')[0];
 
-                    if (!provider) return;
+                    if (provider) {
+                        try {
+                            const employeeId = await supabaseService.getEmployeeId(senderNum);
+                            if (!employeeId) throw new Error("Number not registered.");
 
-                    try {
-                        const employeeId = await supabaseService.getEmployeeId(senderNum);
-                        if (!employeeId) throw new Error("Number not registered.");
-
-                        const success = await supabaseService.toggleIntegration(employeeId, provider, isEnable);
-                        if (success) {
-                            const statusEmoji = isEnable ? '✅' : '🛑';
-                            const statusText = isEnable ? 'ENABLED' : 'DISABLED';
-                            await sock.sendMessage(remoteJid, { text: `${statusEmoji} *INTEGRATION ${statusText}* ${statusEmoji}\n\n${provider.toUpperCase()} tracking is now ${statusText.toLowerCase()} for your account.` });
-                        } else {
-                            throw new Error("Failed to update status.");
+                            const success = await supabaseService.toggleIntegration(employeeId, provider, isEnable);
+                            if (success) {
+                                const statusEmoji = isEnable ? '✅' : '🛑';
+                                const statusText = isEnable ? 'ENABLED' : 'DISABLED';
+                                await sock.sendMessage(remoteJid, { text: `${statusEmoji} *INTEGRATION ${statusText}* ${statusEmoji}\n\n${provider.toUpperCase()} tracking is now ${statusText.toLowerCase()} for your account.` });
+                            } else {
+                                throw new Error("Failed to update status.");
+                            }
+                        } catch (err) {
+                            await sock.sendMessage(remoteJid, { text: `❌ error: ${err.message}` });
                         }
-                    } catch (err) {
-                        await sock.sendMessage(remoteJid, { text: `❌ error: ${err.message}` });
                     }
                 }
-                
+
                 // Skip further processing (DB logging, AI analysis) for all commands
                 continue;
             }
@@ -208,7 +148,7 @@ async function connectToWhatsApp() {
                 } else {
                     groupName = groupNameCache[msg.key.remoteJid];
                 }
-            } catch (e) {}
+            } catch (e) { }
 
             if (config.ALLOWED_GROUP_NAMES?.length > 0) {
                 if (!config.ALLOWED_GROUP_NAMES.includes(groupName.toLowerCase().trim())) continue;
@@ -237,7 +177,7 @@ async function connectToWhatsApp() {
                     message.mediaHash = crypto.createHash('sha256').update(buffer).digest('hex');
                     const publicUrl = await supabaseService.uploadFile('artifacts', `${Date.now()}.jpg`, buffer, 'image/jpeg');
                     if (publicUrl) message.mediaUrl = publicUrl;
-                } catch (e) {}
+                } catch (e) { }
             }
 
             let category = 'other';
@@ -256,7 +196,7 @@ async function connectToWhatsApp() {
                     const screenData = JSON.parse(screenResult.text.replace(/```json|```/g, '').trim());
                     category = screenData.category || 'other';
                     message.messageDetails = screenData.extractedDetails || message.messageDetails;
-                } catch (e) {}
+                } catch (e) { }
             }
 
             message.messageType = category;
@@ -270,7 +210,7 @@ async function connectToWhatsApp() {
     });
 
 
-    
+
     // 📊 Daily Reports
     if (!cronJobsStarted) {
         cron.schedule('41 21 * * *', async () => {
