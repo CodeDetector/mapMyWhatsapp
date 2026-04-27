@@ -27,6 +27,7 @@ const CriticalCommands = {
 const groupNameCache = {};
 let cronJobsStarted = false;
 const sessions = {};
+const sessionRetryCounts = {}; // Track reconnect attempts per session to avoid infinite QR loops
 
 const app = express();
 app.use(express.json());
@@ -82,14 +83,30 @@ async function connectToWhatsApp(employeeId = 'default') {
             console.log(`❌ WhatsApp Session ${employeeId} closed. Status: ${statusCode}`);
             reportStatus(false);
 
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== 405;
+            const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 405;
 
-            if (shouldReconnect) {
-                console.log(`🔄 Reconnecting session ${employeeId} in 5 seconds...`);
-                setTimeout(() => connectToWhatsApp(employeeId), 5000);
-            } else {
+            if (isLoggedOut) {
                 console.error(`❌ Session ${employeeId} dead. Requires re-auth.`);
                 delete sessions[employeeId];
+                delete sessionRetryCounts[employeeId];
+                // Remove session folder from disk so it won't auto-reload on next restart
+                const authPath = path.join(__dirname, 'sessions', `session_${employeeId}`);
+                if (fs.existsSync(authPath)) {
+                    fs.rmSync(authPath, { recursive: true, force: true });
+                    console.log(`🗑️  Deleted dead session folder for employee ${employeeId}.`);
+                }
+            } else {
+                // Guard against infinite QR-timeout loops (e.g. status 408)
+                sessionRetryCounts[employeeId] = (sessionRetryCounts[employeeId] || 0) + 1;
+                const MAX_RETRIES = 6;
+                if (sessionRetryCounts[employeeId] > MAX_RETRIES) {
+                    console.error(`🚫 Session ${employeeId} exceeded ${MAX_RETRIES} reconnect attempts. Giving up. Scan QR from the dashboard to restart.`);
+                    delete sessions[employeeId];
+                    delete sessionRetryCounts[employeeId];
+                } else {
+                    console.log(`🔄 Reconnecting session ${employeeId} in 5 seconds... (attempt ${sessionRetryCounts[employeeId]}/${MAX_RETRIES})`);
+                    setTimeout(() => connectToWhatsApp(employeeId), 5000);
+                }
             }
         } else if (connection === 'open') {
             const connectedNumber = sock.user.id.split(':')[0];
@@ -103,11 +120,13 @@ async function connectToWhatsApp(employeeId = 'default') {
                         sock.logout();
                     } else {
                         console.log(`✅ WhatsApp Session ${employeeId} (${emp.Name}) is VERIFIED and READY!`);
+                        sessionRetryCounts[employeeId] = 0; // Reset retry counter on successful connect
                         reportStatus(true);
                     }
                 });
             } else {
                 console.log(`✅ WhatsApp Session ${employeeId} is READY (Default/Admin)!`);
+                sessionRetryCounts[employeeId] = 0; // Reset retry counter on successful connect
                 reportStatus(true);
             }
         }
@@ -280,14 +299,22 @@ const initAllSessions = async () => {
     const files = fs.readdirSync(sessionsDir);
     const existingSessions = files.filter(f => f.startsWith('session_')).map(f => f.replace('session_', ''));
     
-    // Add default session if exists in old location
-    if (fs.existsSync(path.join(__dirname, 'auth_info_baileys'))) {
-        console.log('🚚 Migrating default session to sessions/session_default');
+    // Migrate legacy auth_info_baileys → sessions/session_default (only if it has valid creds)
+    const legacyAuthPath = path.join(__dirname, 'auth_info_baileys');
+    const legacyCredsFile = path.join(legacyAuthPath, 'creds.json');
+    if (fs.existsSync(legacyCredsFile)) {
         const target = path.join(sessionsDir, 'session_default');
         if (!fs.existsSync(target)) {
-            fs.renameSync(path.join(__dirname, 'auth_info_baileys'), target);
+            console.log('🚚 Migrating legacy session to sessions/session_default');
+            fs.renameSync(legacyAuthPath, target);
             if (!existingSessions.includes('default')) existingSessions.push('default');
+        } else {
+            console.log('⚠️  Legacy auth_info_baileys found but session_default already exists. Skipping migration.');
         }
+    } else if (fs.existsSync(legacyAuthPath)) {
+        // Stale/empty auth_info_baileys with no creds — delete it
+        console.log('🗑️  Removing stale auth_info_baileys (no creds.json found).');
+        fs.rmSync(legacyAuthPath, { recursive: true, force: true });
     }
 
     if (existingSessions.length === 0) {
