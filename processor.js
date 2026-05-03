@@ -13,6 +13,7 @@ const intelligenceService = require('./intelligenceService');
 const prompts = require('./prompts');
 const { generateAndSendReport } = require('./generateReport');
 const { handleConnectGmail, handleGmailCode } = require('./criticalCmds/gmailAuthCmds');
+const knowledgeMapService = require('./knowledgeMapService');
 
 const { parseMessage } = require('./messageParser');
 const { screeningPrompt } = prompts;
@@ -236,6 +237,12 @@ async function connectToWhatsApp(employeeId = 'default') {
             message.messageType = category;
             await supabaseService.sendtoDatabase(message);
 
+            // Flag this employee's knowledge map for rebuild
+            const empId = await supabaseService.getEmployeeId(message.senderNumber);
+            if (empId) {
+                await supabaseService.markKnowledgeMapDirty(empId);
+            }
+
             await intelligenceService.processMessageForGraph(
                 message.messageDetails,
                 { messageId: message.messageId, sender: message.sender }
@@ -245,6 +252,7 @@ async function connectToWhatsApp(employeeId = 'default') {
 
     if (!cronJobsStarted) {
         startCronJobs(sock);
+        knowledgeMapService.start();
         cronJobsStarted = true;
     }
 }

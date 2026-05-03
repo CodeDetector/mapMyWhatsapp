@@ -496,6 +496,93 @@ class SupabaseService {
             return { nodes: [], edges: [] };
         }
     }
+
+    // ─── Knowledge Map Methods ───────────────────────────────────
+
+    async markKnowledgeMapDirty(employeeId) {
+        if (!this.client || !employeeId) return;
+        try {
+            const { data: existing } = await this.client
+                .from('knowledge_maps')
+                .select('id')
+                .eq('employee_id', employeeId)
+                .maybeSingle();
+
+            if (existing) {
+                await this.client
+                    .from('knowledge_maps')
+                    .update({ is_dirty: true, updated_at: new Date().toISOString() })
+                    .eq('id', existing.id);
+            } else {
+                await this.client
+                    .from('knowledge_maps')
+                    .insert([{ employee_id: employeeId, is_dirty: true, knowledge_map: {} }]);
+            }
+        } catch (err) {
+            console.error(`❌ markKnowledgeMapDirty failed for ${employeeId}:`, err.message);
+        }
+    }
+
+    async getDirtyKnowledgeMaps() {
+        if (!this.client) return [];
+        try {
+            const { data, error } = await this.client
+                .from('knowledge_maps')
+                .select('id, employee_id, knowledge_map, last_rebuilt_at')
+                .eq('is_dirty', true);
+            if (error) throw error;
+            return data || [];
+        } catch (err) {
+            console.error('❌ getDirtyKnowledgeMaps failed:', err.message);
+            return [];
+        }
+    }
+
+    async getNewInteractionsSince(employeeId, sinceTimestamp) {
+        if (!this.client) return { messages: [], emails: [] };
+        try {
+            const since = sinceTimestamp || new Date(0).toISOString();
+
+            const { data: messages, error: msgErr } = await this.client
+                .from('messages')
+                .select('description, created_at, messageType')
+                .eq('employeeId', employeeId)
+                .gte('created_at', since)
+                .order('created_at', { ascending: true });
+            if (msgErr) throw msgErr;
+
+            const { data: emails, error: emailErr } = await this.client
+                .from('emails')
+                .select('sender, receiver, message, created_at')
+                .eq('employeeId', employeeId)
+                .gte('created_at', since)
+                .order('created_at', { ascending: true });
+            if (emailErr) throw emailErr;
+
+            return { messages: messages || [], emails: emails || [] };
+        } catch (err) {
+            console.error(`❌ getNewInteractionsSince failed for ${employeeId}:`, err.message);
+            return { messages: [], emails: [] };
+        }
+    }
+
+    async saveKnowledgeMap(knowledgeMapId, knowledgeMapJson) {
+        if (!this.client || !knowledgeMapId) return;
+        try {
+            const { error } = await this.client
+                .from('knowledge_maps')
+                .update({
+                    knowledge_map: knowledgeMapJson,
+                    is_dirty: false,
+                    last_rebuilt_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString()
+                })
+                .eq('id', knowledgeMapId);
+            if (error) throw error;
+        } catch (err) {
+            console.error(`❌ saveKnowledgeMap failed for ${knowledgeMapId}:`, err.message);
+        }
+    }
 }
 
 module.exports = new SupabaseService();

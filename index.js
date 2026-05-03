@@ -1,18 +1,20 @@
-const whatsappProcessor = require('./processor');
+const { app, initAllSessions, run } = require('./processorCloudAPI');
+const PORT = process.env.PORT || 3001;
 
-function run() {
-    console.log('📱 Starting OMNI-BRAIN: WhatsApp Container...');
-    whatsappProcessor.initAllSessions().catch(err => {
-        console.error('❌ WhatsApp Container Crash:', err.message);
-        process.exit(1);
-    });
-}
+// Start the Express server for webhook
+app.listen(PORT, () => {
+    console.log(`📡 WhatsApp Cloud API Manager listening on port ${PORT}`);
+    console.log(`📧 Webhook endpoint: POST http://localhost:${PORT}/webhook`);
+    console.log(`🔐 Webhook verification endpoint: GET http://localhost:${PORT}/webhook`);
+});
 
+// Initialize all sessions
 if (require.main === module) {
     run();
 }
 
 module.exports = {
-    whatsappProcessor,
-    run
+    app,
+    run,
+    initAllSessions
 };

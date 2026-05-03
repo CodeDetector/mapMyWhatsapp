@@ -2,7 +2,7 @@ const supabaseService = require('./supabaseService');
 const intelligenceService = require('./intelligenceService');
 const { managerScreeningReportPrompt, employeeScreeningReportPrompt } = require('./prompts');
 
-async function generateAndSendReport(sock) {
+async function generateAndSendReport(messageSender) {
     console.log('📊 Starting Cross-Channel Report Generation...');
     
     try {
@@ -13,9 +13,8 @@ async function generateAndSendReport(sock) {
             const employees = await supabaseService.getEmployeesByManager(manager.id);
             console.log(`👥 Manager ${manager.Name} has ${employees.length} employees.`);
 
-            const managerJid = manager.Mobile.includes('@s.whatsapp.net') 
-                ? manager.Mobile 
-                : `${manager.Mobile.replace(/\D/g, '')}@s.whatsapp.net`;
+            // Extract phone number (works for Cloud API)
+            const managerPhone = manager.Mobile.replace(/\D/g, '');
 
             for (const emp of employees) {
                 console.log(`📝 Processing report for ${emp.Name}...`);
@@ -48,17 +47,29 @@ async function generateAndSendReport(sock) {
                 const employeePrompt = employeeScreeningReportPrompt(emp, logBlob, graphContext);
 
                 // 5. Send to WhatsApp
-                const empJid = emp.Mobile.includes('@s.whatsapp.net') 
-                    ? emp.Mobile 
-                    : `${emp.Mobile.replace(/\D/g, '')}@s.whatsapp.net`;
+                const empPhone = emp.Mobile.replace(/\D/g, '');
 
                 // Sending to Employee (Encouraging tone)
-                // await sock.sendMessage(empJid, { text: `👋 *Omni-Brain Weekly Digest*\n\nGenerating your personal summary...` });
-                // [API Call to generate content here if needed, or already inside prompt]
+                if (messageSender && messageSender.sendMessage) {
+                    try {
+                        await messageSender.sendMessage(empPhone, { 
+                            text: `👋 *Omni-Brain Weekly Digest*\n\nGenerating your personal summary...` 
+                        });
+                    } catch (err) {
+                        console.warn(`⚠️ Could not send message to employee ${emp.Name}:`, err.message);
+                    }
+                }
 
-                // For simplicity in this standalone version, we skip the AI generation call here 
-                // and assume current logic uses Gemini elsewhere or this is the prompt builder.
-                // In actual processor.js, generateAndSendReport is called.
+                // Send manager report
+                if (messageSender && messageSender.sendMessage) {
+                    try {
+                        await messageSender.sendMessage(managerPhone, { 
+                            text: `📊 *Manager Report for ${emp.Name}*\n\n${managerPrompt}` 
+                        });
+                    } catch (err) {
+                        console.warn(`⚠️ Could not send report to manager:`, err.message);
+                    }
+                }
             }
         }
     } catch (err) {
