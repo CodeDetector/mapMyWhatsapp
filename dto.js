@@ -9,7 +9,7 @@ class MessageDTO {
         this.employeeId = employeeId;
         this.mediaUrl = data.mediaUrl || null;
         this.mediaHash = data.mediaHash || null;
-        
+
         // If messageType is Text, objectId must be null
         if (this.messageType === 'Text') {
             this.objectId = null;
@@ -26,12 +26,12 @@ class MessageDTO {
     getPayload() {
         return {
             messageTraceId: this.messageTraceId,
-            messageType: this.messageType,
-            description: this.description,
-            employeeId: this.employeeId,
-            objectId: this.objectId,
-            mediaUrl: this.mediaUrl,
-            mediaHash: this.mediaHash
+            messageType:    this.messageType,
+            description:    this.description,
+            employeeId:     this.employeeId,
+            objectId:       this.objectId,
+            mediaUrl:       this.mediaUrl,
+            mediaHash:      this.mediaHash,
         };
     }
 }

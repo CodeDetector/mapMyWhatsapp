@@ -83,6 +83,49 @@ class SupabaseService {
         }
     }
 
+    /**
+     * Multi-tenant Baileys variant. Writes the message in two steps:
+     *   1. Upsert into the shared `messages` table (unchanged shape).
+     *   2. Upsert WhatsApp-specific channel metadata (chatJid, sender) into
+     *      the `Whatsapp` table, joined back via messageTraceId.
+     */
+    async sendTrackedMessageToDatabase(message, ownerEmployeeId) {
+        if (!this.client) return;
+        try {
+            // 1) shared messages row — upsert so edits/deletes overwrite the original
+            const dto = new MessageDTO(message, ownerEmployeeId);
+            const payload = dto.getPayload();
+            const { error: msgErr } = await this.client
+                .from('messages')
+                .upsert([payload], { onConflict: 'messageTraceId' });
+            if (msgErr) {
+                console.error('❌ messages upsert failed:', msgErr.message);
+                return;
+            }
+
+            // 2) WhatsApp channel-specific metadata
+            const { error: waErr } = await this.client
+                .from('Whatsapp')
+                .upsert(
+                    [{
+                        employeeID:     ownerEmployeeId,
+                        messageTraceId: message.messageId,
+                        chatJid:        message.chatJid     || null,
+                        senderName:     message.sender      || null,
+                        senderNumber:   message.senderNumber|| null,
+                    }],
+                    { onConflict: 'messageTraceId' }
+                );
+            if (waErr) {
+                console.error('❌ Whatsapp upsert failed:', waErr.message);
+                return;
+            }
+            console.log(`✅ Stored WA message ${message.messageId} for employee ${ownerEmployeeId} (chat ${message.chatJid}).`);
+        } catch (err) {
+            console.error('❌ sendTrackedMessageToDatabase failed:', err.message);
+        }
+    }
+
     async getIdByEmail(email, table) {
         if (!this.client || !email) return null;
         try {

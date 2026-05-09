@@ -1,20 +1,20 @@
-const { app, initAllSessions, run } = require('./processorCloudAPI');
-const PORT = process.env.PORT || 3001;
+/**
+ * Multi-tenant Baileys WhatsApp feeder.
+ *
+ * Runs in-process inside wa-field-tracker — no separate HTTP listener.
+ * The main server imports `sessionManager` directly and invokes its
+ * methods, so QR / status / track / disconnect calls are zero-overhead.
+ */
+const sessionManager         = require('./sessionManager');
+const { setWhatsAppHandler } = require('./messageHandler');
 
-// Start the Express server for webhook
-app.listen(PORT, () => {
-    console.log(`📡 WhatsApp Cloud API Manager listening on port ${PORT}`);
-    console.log(`📧 Webhook endpoint: POST http://localhost:${PORT}/webhook`);
-    console.log(`🔐 Webhook verification endpoint: GET http://localhost:${PORT}/webhook`);
-});
-
-// Initialize all sessions
-if (require.main === module) {
-    run();
+async function run() {
+    console.log('📬 WhatsApp Baileys feeder: restoring persisted sessions…');
+    await sessionManager.initAllSessions();
 }
 
-module.exports = {
-    app,
-    run,
-    initAllSessions
-};
+if (require.main === module) {
+    run().catch(err => { console.error('Boot failed:', err); process.exit(1); });
+}
+
+module.exports = { run, sessionManager, setWhatsAppHandler };
