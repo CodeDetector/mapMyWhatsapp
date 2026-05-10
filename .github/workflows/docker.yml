@@ -21,4 +21,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: codedetector/map-my-whatsapp:latest
+          tags: dhruvsharma983/map-my-whatsapp:latest
