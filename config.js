@@ -1,11 +1,6 @@
 require('dotenv').config();
 
 module.exports = {
-    ALLOWED_GROUP_NAMES: (process.env.ALLOWED_GROUPS || "")
-        .replace(/[\[\]]/g, "") 
-        .split(",")
-        .map(n => n.trim().replace(/^['"]|['"]$/g, "").toLowerCase())
-        .filter(n => n !== ""),
     SUPABASE_URL: process.env.SUPABASE_URL,
     SUPABASE_KEY: process.env.SUPABASE_KEY,
     GEMINI_API_KEY: process.env.GEMINI_API_KEY,

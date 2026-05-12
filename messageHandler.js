@@ -13,12 +13,31 @@ const pino   = require('pino');
 const crypto = require('crypto');
 const { parseMessage }  = require('./messageParser');
 const supabaseService   = require('./supabaseService');
+const { enqueue: enqueueAgentJob } = require('./queue');
 
 const SILENT_LOGGER = pino({ level: 'silent' });
 
 // ── Default handler (standalone feeder behaviour) ────────────────────────────
+// 1. Persist the message (intake → messages, channel → Whatsapp tables).
+// 2. Enqueue an agent_jobs row so the refinement worker (in omni-backend) picks it up.
 async function _defaultWAHandler(parsedMessage, ownerEmployeeId) {
     await supabaseService.sendTrackedMessageToDatabase(parsedMessage, ownerEmployeeId);
+    await enqueueAgentJob({
+        channel: 'whatsapp',
+        sourceTable: 'Whatsapp',
+        sourceId: null,
+        payload: {
+            messageTraceId: parsedMessage.messageId || null,
+            employeeId:     ownerEmployeeId,
+            chatJid:        parsedMessage.chatJid      || null,
+            senderName:     parsedMessage.sender       || null,
+            senderNumber:   parsedMessage.senderNumber || null,
+            senderLabel:    parsedMessage.sender || parsedMessage.senderNumber || null,
+            messageText:    parsedMessage.messageDetails || '',
+            format:         parsedMessage.format || 'text',
+            mediaUrl:       parsedMessage.mediaUrl || null,
+        },
+    });
 }
 
 let _waHandler = _defaultWAHandler;
