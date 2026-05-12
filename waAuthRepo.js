@@ -64,10 +64,12 @@ async function deleteKey(employeeId, type, keyId) {
         .eq('key_id', keyId);
 }
 
-// Wipe everything on logout.
+// Wipe everything on logout / orphan cleanup. Also clears tracked chats so
+// the next pairing starts from a clean slate.
 async function wipeAuth(employeeId) {
     await client().from('wa_auth_keys').delete().eq('employee_id', employeeId);
     await client().from('wa_auth_creds').delete().eq('employee_id', employeeId);
+    await client().from('wa_tracked_chats').delete().eq('employee_id', employeeId);
 }
 
 // All employees who have a stored session — used to auto-restore on startup.

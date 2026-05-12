@@ -14,6 +14,7 @@ const pino = require('pino');
 
 const { useSupabaseAuthState } = require('./authState');
 const waAuthRepo               = require('./waAuthRepo');
+const supabaseService          = require('./supabaseService');
 const { handleMessage }        = require('./messageHandler');
 
 const SILENT_LOGGER = pino({ level: 'silent' });
@@ -246,10 +247,44 @@ async function initAllSessions() {
         console.log('🆕 No persisted WA sessions to restore.');
         return;
     }
-    console.log(`📂 Restoring ${employeeIds.length} WA session(s)…`);
-    for (const id of employeeIds) {
+
+    // Filter out IDs whose employee row has been deleted. Without this, Baileys
+    // would still try to persist key/cred updates and trip the FK constraint on
+    // every inbound message (the "saveKey error: ...employee_id_fkey" loop).
+    const liveIds = await _filterToExistingEmployees(employeeIds);
+    const orphanIds = employeeIds.filter(id => !liveIds.includes(id));
+
+    if (orphanIds.length) {
+        console.warn(`🧹 Cleaning up ${orphanIds.length} orphan WA session(s): ${orphanIds.join(', ')}`);
+        for (const id of orphanIds) {
+            try { await waAuthRepo.wipeAuth(id); }
+            catch (err) { console.error(`wipeAuth(${id}) failed:`, err.message); }
+        }
+    }
+
+    if (liveIds.length === 0) {
+        console.log('🆕 No live WA sessions to restore after orphan cleanup.');
+        return;
+    }
+    console.log(`📂 Restoring ${liveIds.length} WA session(s)…`);
+    for (const id of liveIds) {
         startSession(id).catch(err => console.error(`Failed to restore session ${id}:`, err.message));
     }
+}
+
+// Given a list of employee IDs, return the subset that still exists in `employees`.
+async function _filterToExistingEmployees(ids) {
+    if (!supabaseService.client || !ids.length) return [];
+    const { data, error } = await supabaseService.client
+        .from('employees')
+        .select('id')
+        .in('id', ids);
+    if (error) {
+        console.error('_filterToExistingEmployees failed:', error.message);
+        // Fail-open: keep all IDs so we don't drop live sessions on a transient DB error.
+        return ids;
+    }
+    return (data || []).map(r => r.id);
 }
 
 module.exports = {
