@@ -67,8 +67,19 @@ async function handleMessage(msg, sock, ownerEmployeeId, trackedJids) {
     const parsed = parseMessage(msg);
     if (!parsed) return;
 
-    const rawSender    = msg.key.participant || remoteJid;
+    // WhatsApp now exposes participants as LIDs (`<id>@lid`) in groups/communities
+    // for privacy. The actual phone-number JID, when WhatsApp knows it, is
+    // delivered as `senderPn` / `participantPn` on the same message key.
+    // Prefer those; fall back to the raw participant; record both so we can
+    // resolve later if only the LID is available now.
+    const phoneJid = msg.key.senderPn || msg.key.participantPn || null;
+    const lidJid   = (msg.key.participant && msg.key.participant.endsWith('@lid'))
+                       ? msg.key.participant
+                       : null;
+    const rawSender = phoneJid || msg.key.participant || remoteJid;
+
     const senderNumber = rawSender.split('@')[0];
+    const senderLid    = lidJid ? lidJid.split('@')[0] : null;
     const sender       = msg.pushName || senderNumber;
 
     const parsedMessage = {
@@ -81,6 +92,7 @@ async function handleMessage(msg, sock, ownerEmployeeId, trackedJids) {
         groupId:        remoteJid.endsWith('@g.us') ? `GID${remoteJid.split('@')[0]}` : null,
         sender,
         senderNumber,
+        senderLid,
         action:         parsed.action,
         timestamp:      new Date().toLocaleString(),
     };

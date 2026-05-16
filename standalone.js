@@ -72,6 +72,32 @@ app.get('/sessions/:employeeId/groups', requireInternalToken, async (req, res) =
     }
 });
 
+// Force-refresh the ready-groups cache (called by wa-field-tracker after
+// a participant is resolved so the gate updates without restart).
+app.post('/sessions/:employeeId/refresh-ready', requireInternalToken, async (req, res) => {
+    const empId = Number(req.params.employeeId);
+    if (!empId) return res.status(400).json({ error: 'employeeId required' });
+    try {
+        const set = await sessionManager.refreshReadyCache(empId);
+        res.json({ ok: true, count: set.size });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/sessions/:employeeId/groups/participants', requireInternalToken, async (req, res) => {
+    const empId = Number(req.params.employeeId);
+    const { jid } = req.body;
+    if (!empId || !jid) return res.status(400).json({ error: 'employeeId and jid required' });
+    try {
+        const list = await sessionManager.getGroupParticipants(empId, jid);
+        if (list === null) return res.status(409).json({ error: 'session not connected' });
+        res.json(list);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/sessions/:employeeId/contacts', requireInternalToken, (req, res) => {
     const empId = Number(req.params.employeeId);
     if (!empId) return res.status(400).json({ error: 'employeeId required' });

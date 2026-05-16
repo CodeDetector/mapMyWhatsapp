@@ -14,6 +14,7 @@ const pino = require('pino');
 
 const { useSupabaseAuthState } = require('./authState');
 const waAuthRepo               = require('./waAuthRepo');
+const supabaseService          = require('./supabaseService');
 const { handleMessage }        = require('./messageHandler');
 
 const SILENT_LOGGER = pino({ level: 'silent' });
@@ -24,6 +25,8 @@ const MAX_RECONNECT_ATTEMPTS = 6;
 const sessions = new Map();
 // employeeId → Set<jid>  (tracked chat cache, refreshed on connect)
 const trackedCache = new Map();
+// employeeId → Set<groupJid>  (groups whose participants are fully resolved)
+const readyCache = new Map();
 // employeeId → Map<jid, { jid, name, notify }>  (contacts seen via contacts.upsert)
 const contactsCache = new Map();
 
@@ -37,6 +40,12 @@ function getOrInitEntry(employeeId) {
 async function refreshTrackedCache(employeeId) {
     const set = await waAuthRepo.getTrackedJidSet(employeeId);
     trackedCache.set(employeeId, set);
+    return set;
+}
+
+async function refreshReadyCache(employeeId) {
+    const set = await waAuthRepo.getReadyGroupSet(employeeId);
+    readyCache.set(employeeId, set);
     return set;
 }
 
@@ -91,6 +100,7 @@ async function startSession(employeeId) {
             entry.retries   = 0;
             entry.jid       = sock.user?.id || null;
             await refreshTrackedCache(employeeId);
+            await refreshReadyCache(employeeId);
             console.log(`✅ WA session ${employeeId} connected as ${entry.jid}`);
         }
 
@@ -124,6 +134,33 @@ async function startSession(employeeId) {
     sock.ev.on('contacts.upsert',  (contacts) => contacts.forEach(c => upsertContact(employeeId, c)));
     sock.ev.on('contacts.update',  (updates)  => updates.forEach(c => upsertContact(employeeId, c)));
 
+    // Backfill: keep wa_group_participants in sync as members join/leave tracked groups.
+    sock.ev.on('group-participants.update', async (ev) => {
+        try {
+            const tracked = trackedCache.get(employeeId);
+            if (!tracked?.has(ev.id)) return;   // only care about tracked groups
+
+            if (ev.action === 'add') {
+                const enriched = ev.participants.map(jid => ({
+                    jid,
+                    lid:    jid.endsWith('@lid') ? jid : null,
+                    notify: null,
+                }));
+                await waAuthRepo.addParticipantsToGroup(employeeId, ev.id, enriched);
+                console.log(`➕ [emp ${employeeId}] group ${ev.id}: +${ev.participants.length} member(s) added — wizard required again`);
+            } else if (ev.action === 'remove') {
+                await waAuthRepo.removeParticipantsFromGroup(employeeId, ev.id, ev.participants);
+                console.log(`➖ [emp ${employeeId}] group ${ev.id}: -${ev.participants.length} member(s) removed`);
+            } else {
+                // 'promote' | 'demote' — admin flag only, no readiness impact
+                return;
+            }
+            await refreshReadyCache(employeeId);
+        } catch (err) {
+            console.error('group-participants.update handler error:', err.message);
+        }
+    });
+
     // Chats list fires on connect — seed contacts from every non-group chat
     sock.ev.on('chats.upsert', (chats) => {
         for (const chat of chats) {
@@ -143,6 +180,8 @@ async function startSession(employeeId) {
             console.log(`🔍 [emp ${employeeId}] tracked cache miss — refreshing from DB`);
             tracked = await refreshTrackedCache(employeeId);
         }
+        let ready = readyCache.get(employeeId);
+        if (!ready) ready = await refreshReadyCache(employeeId);
 
         if (!tracked || tracked.size === 0) {
             console.log(`⏭️  [emp ${employeeId}] no tracked chats — dropping ${m.messages.length} message(s)`);
@@ -156,7 +195,18 @@ async function startSession(employeeId) {
                 upsertContact(employeeId, { id: remoteJid, name: msg.pushName || null });
             }
             const isTracked = tracked.has(remoteJid);
-            console.log(`📨 [emp ${employeeId}] msg from ${remoteJid} → ${isTracked ? 'TRACKED ✓' : 'untracked, skip'}`);
+            // Group messages additionally require full participant resolution
+            const isGroup     = remoteJid?.endsWith('@g.us');
+            const isGroupReady = !isGroup || ready.has(remoteJid);
+            if (!isTracked) {
+                console.log(`📨 [emp ${employeeId}] msg from ${remoteJid} → untracked, skip`);
+                continue;
+            }
+            if (!isGroupReady) {
+                console.log(`⏳ [emp ${employeeId}] group ${remoteJid} has unresolved participants — dropping`);
+                continue;
+            }
+            console.log(`📨 [emp ${employeeId}] msg from ${remoteJid} → TRACKED ✓`);
             try {
                 await handleMessage(msg, sock, employeeId, tracked);
             } catch (err) {
@@ -199,6 +249,35 @@ async function listGroups(employeeId) {
     } catch (err) {
         console.error('listGroups error:', err.message);
         return [];
+    }
+}
+
+// Fetch the full participant roster of a single group.
+// Each entry: { jid, lid, phone, isAdmin, notify }
+// - `jid` is the participant identifier as Baileys returns it (may be @lid or @s.whatsapp.net)
+// - `lid` is set only when the participant arrived as a LID
+// - `phone` is the resolved phone JID if WhatsApp exposes it via senderPn/phoneNumber/etc.
+async function getGroupParticipants(employeeId, groupJid) {
+    const e = sessions.get(employeeId);
+    if (!e?.sock || !e.connected) return null;
+    try {
+        const meta = await e.sock.groupMetadata(groupJid);
+        if (!meta?.participants) return [];
+        return meta.participants.map(p => {
+            const id      = p.id || '';
+            const isLid   = id.endsWith('@lid');
+            const phoneJid = p.phoneNumber || p.lidPhoneNumber || (!isLid ? id : null);
+            return {
+                jid:     id,
+                lid:     isLid ? id : (p.lid || null),
+                phone:   phoneJid,
+                isAdmin: p.admin === 'admin' || p.admin === 'superadmin',
+                notify:  p.notify || p.name || null,
+            };
+        });
+    } catch (err) {
+        console.error('getGroupParticipants error:', err.message);
+        return null;
     }
 }
 
@@ -246,10 +325,44 @@ async function initAllSessions() {
         console.log('🆕 No persisted WA sessions to restore.');
         return;
     }
-    console.log(`📂 Restoring ${employeeIds.length} WA session(s)…`);
-    for (const id of employeeIds) {
+
+    // Filter out IDs whose employee row has been deleted. Without this, Baileys
+    // would still try to persist key/cred updates and trip the FK constraint on
+    // every inbound message (the "saveKey error: ...employee_id_fkey" loop).
+    const liveIds = await _filterToExistingEmployees(employeeIds);
+    const orphanIds = employeeIds.filter(id => !liveIds.includes(id));
+
+    if (orphanIds.length) {
+        console.warn(`🧹 Cleaning up ${orphanIds.length} orphan WA session(s): ${orphanIds.join(', ')}`);
+        for (const id of orphanIds) {
+            try { await waAuthRepo.wipeAuth(id); }
+            catch (err) { console.error(`wipeAuth(${id}) failed:`, err.message); }
+        }
+    }
+
+    if (liveIds.length === 0) {
+        console.log('🆕 No live WA sessions to restore after orphan cleanup.');
+        return;
+    }
+    console.log(`📂 Restoring ${liveIds.length} WA session(s)…`);
+    for (const id of liveIds) {
         startSession(id).catch(err => console.error(`Failed to restore session ${id}:`, err.message));
     }
+}
+
+// Given a list of employee IDs, return the subset that still exists in `employees`.
+async function _filterToExistingEmployees(ids) {
+    if (!supabaseService.client || !ids.length) return [];
+    const { data, error } = await supabaseService.client
+        .from('employees')
+        .select('id')
+        .in('id', ids);
+    if (error) {
+        console.error('_filterToExistingEmployees failed:', error.message);
+        // Fail-open: keep all IDs so we don't drop live sessions on a transient DB error.
+        return ids;
+    }
+    return (data || []).map(r => r.id);
 }
 
 module.exports = {
@@ -257,6 +370,8 @@ module.exports = {
     getStatus,
     disconnect,
     listGroups,
+    getGroupParticipants,
+    refreshReadyCache,
     listContacts,
     resolvePhone,
     trackChat,
