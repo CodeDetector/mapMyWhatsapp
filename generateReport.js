@@ -1,5 +1,4 @@
 const supabaseService = require('./supabaseService');
-const intelligenceService = require('./intelligenceService');
 const { managerScreeningReportPrompt, employeeScreeningReportPrompt } = require('./prompts');
 
 async function generateAndSendReport(messageSender) {
